@@ -11,7 +11,7 @@ from data.data_generator import generate_data
 
 FLAGS = tf.flags.FLAGS
 parser = argparse.ArgumentParser()
-parser.add_argument('--batch_size', default=100, type=int, help='batch size')
+parser.add_argument('--batch_size', default=32, type=int, help='batch size')
 parser.add_argument('--train_steps', default=1000, type=int,
                     help='number of training steps')
 
@@ -86,10 +86,8 @@ def model_fn(features, labels, mode, params):
 
 	assert mode == tf.estimator.ModeKeys.TRAIN
 	global_step = tf.train.get_global_step()
-	current_epoch = (
-		tf.cast(global_step, tf.float32) / params["batches_per_epoch"])
-	learning_rate = learning_rate_schedule(current_epoch)
-	optimizer = tf.train.AdagradOptimizer(learning_rate=learning_rate)
+	#learning_rate = learning_rate_schedule(current_epoch)
+	optimizer = tf.train.AdagradOptimizer(learning_rate=0.1)
 	train_op = optimizer.minimize(loss, global_step=global_step)
 	return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
 
