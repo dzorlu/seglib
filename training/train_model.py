@@ -61,8 +61,9 @@ def model_fn(features, labels, mode, params):
 	densenet.encode(features=features,
 									num_units=encoder_num_units,
 									bottleneck_number_feature_maps=bottleneck_number_feature_maps)
-	logits = densenet.decode(decoder_num_units)
-	predictions = tf.argmax(logits.output, axis=1)
+	logits = densenet.decode(decoder_num_units).output
+	print(logits)
+	predictions = tf.argmax(logits, axis=1)
 	if mode == tf.estimator.ModeKeys.PREDICT:
 		predictions = {
 			'class_ids': predictions,
