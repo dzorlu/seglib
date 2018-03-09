@@ -11,7 +11,9 @@ from data.data_generator import generate_data
 
 FLAGS = tf.flags.FLAGS
 parser = argparse.ArgumentParser()
-parser.add_argument('--batch_size', default=32, type=int, help='batch size')
+parser.add_argument('--batch_size', default=8, type=int, help='batch size')
+parser.add_argument('--number_classes', default=2, type=int, help='number of classes')
+parser.add_argument('--model_dir', default='/tmp/tf/seg/', type=str, help='number of classes')
 parser.add_argument('--train_steps', default=1000, type=int,
                     help='number of training steps')
 
@@ -62,8 +64,8 @@ def model_fn(features, labels, mode, params):
 									num_units=encoder_num_units,
 									bottleneck_number_feature_maps=bottleneck_number_feature_maps)
 	logits = densenet.decode(decoder_num_units).output
-	print(logits)
 	predictions = tf.argmax(logits, axis=1)
+	tf.summary.image('predictions', predictions)
 	if mode == tf.estimator.ModeKeys.PREDICT:
 		predictions = {
 			'class_ids': predictions,
@@ -87,21 +89,28 @@ def model_fn(features, labels, mode, params):
 
 	assert mode == tf.estimator.ModeKeys.TRAIN
 	global_step = tf.train.get_global_step()
-	#learning_rate = learning_rate_schedule(current_epoch)
+	update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
 	optimizer = tf.train.AdagradOptimizer(learning_rate=0.1)
-	train_op = optimizer.minimize(loss, global_step=global_step)
+	with tf.control_dependencies(update_ops):
+		train_op = optimizer.minimize(loss, global_step=global_step)
+
 	return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
 
 
 def main(argv):
 	args = parser.parse_args(argv[1:])
+
+	config = tf.estimator.RunConfig(save_checkpoints_steps=30,
+	                       save_summary_steps=30,
+	                       model_dir=args.model_dir)
 	classifier = tf.estimator.Estimator(
 		model_fn=model_fn,
+		config=config,
 		params={
-			'number_classes': 2,
+			'number_classes': args.number_classes,
 			'growth_rate': 12,
 			'dropout_keep_prob': 0.2,
-			'encoder_num_units': [4,5,7,10,12],
+			'encoder_num_units': [4, 5, 7, 10, 12],
 			'decoder_num_units': [12, 10, 7, 5],
 			'bottleneck_number_feature_maps': 48
 		}
@@ -109,12 +118,12 @@ def main(argv):
 
 	# Train the Model.
 	classifier.train(
-		input_fn=lambda: generate_data(args.batch_size),
+		input_fn=lambda: generate_data(args.batch_size, args.number_classes),
 		steps=args.train_steps)
 
 	# Evaluate the model.
 	eval_result = classifier.evaluate(
-		input_fn=lambda: generate_data(args.batch_size))
+		input_fn=lambda: generate_data(args.batch_size, args.number_classes))
 
 	print('\nTest set accuracy: {accuracy:0.3f}\n'.format(**eval_result))
 
