@@ -28,6 +28,7 @@ class DenseNet(object):
     #
     self.encoder = None
     self.decoder = None
+    self.graph = None
 
   def encode(self,
              features,
@@ -82,43 +83,45 @@ class DenseNet(object):
     encoder = self.encoder
     graph = encoder.graph
     with graph.as_default():
-      net = encoder.output
-      skip_connections = encoder.graph.get_collection('skip_connections')
-      if len(num_units) != len(skip_connections):
-        raise ValueError("num units must match skip connections")
-      # start from the last layer
-      for bn, (num_units_in_block, skip_connection) in enumerate(zip(num_units, reversed(skip_connections))):
-        with tf.variable_scope("block_{}".format(bn + 1), values=[net]):
-          # transition up the bottleneck layer
-          net = densenet_utils.add_transition_up_layer(net)
-          # concat with next skip connection.
-          net = tf.concat(axis=3, values=[net, skip_connection])
-          # denseblock
-          for un, unit in enumerate(range(num_units_in_block)):
-            with tf.variable_scope("unit_{}".format(un + 1), values=[net]):
-              output = densenet_utils.stack_blocks_dense(net,
-                                                         growth_rate=self.growth_rate,
-                                                         dropout_keep_prob=self.dropout_keep_prob)
-              # unlike downsampling path, do not concatenate the input layer within the dense block
-              if un > 0:
-                net = tf.concat(axis=3, values=[net, output])
-              else:
-                net = output
-      with tf.variable_scope('logits'):
-        net = tf.layers.conv2d(net,
-                               self.number_classes,
-                               kernel_size=1,
-                               activation=tf.identity)
+      with tf.variable_scope('decoder', 'densenet', reuse=self.reuse):
+        net = encoder.output
+        skip_connections = encoder.graph.get_collection('skip_connections')
+        if len(num_units) != len(skip_connections):
+          raise ValueError("num units must match skip connections")
+        # start from the last layer
+        for bn, (num_units_in_block, skip_connection) in enumerate(zip(num_units, reversed(skip_connections))):
+          with tf.variable_scope("block_{}".format(bn + 1), values=[net]):
+            # transition up the bottleneck layer
+            net = densenet_utils.add_transition_up_layer(net)
+            # concat with next skip connection.
+            net = tf.concat(axis=3, values=[net, skip_connection])
+            # denseblock
+            for un, unit in enumerate(range(num_units_in_block)):
+              with tf.variable_scope("unit_{}".format(un + 1), values=[net]):
+                output = densenet_utils.stack_blocks_dense(net,
+                                                           growth_rate=self.growth_rate,
+                                                           dropout_keep_prob=self.dropout_keep_prob)
+                # unlike downsampling path, do not concatenate the input layer within the dense block
+                if un > 0:
+                  net = tf.concat(axis=3, values=[net, output])
+                else:
+                  net = output
+        with tf.variable_scope('logits'):
+          net = tf.layers.conv2d(net,
+                                 self.number_classes,
+                                 kernel_size=1,
+                                 activation=tf.identity)
+    self.graph = net.graph
     return Decoder(graph=net.graph, output=net)
 
   def build_graph(self, image):
     k = 12
-    num_encoder_units = [4, 5, 7, 10, 12]
+    num_encoder_units = [4, 5, 7, 10]
     bottleneck_number_feature_maps = k * 4
     self.encode(features=image,
                 num_units=num_encoder_units,
                 bottleneck_number_feature_maps=bottleneck_number_feature_maps)
-    num_decoder_units = [12, 10, 7, 5]
+    num_decoder_units = [10, 7, 5]
     self.decode(num_units=num_decoder_units)
 
 def main(unused_argv):
