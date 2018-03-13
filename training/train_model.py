@@ -1,6 +1,7 @@
 import tensorflow as tf
 import argparse
 import sys
+import numpy as np
 
 sys.path.append('/Users/denizzorlu/seglib/')
 
@@ -8,6 +9,7 @@ sys.path.append('/Users/denizzorlu/seglib/')
 from models.densenet import DenseNet
 from data.data_generator import generate_data
 from utils.tf_utils import get_number_params
+from utils import utils
 
 
 FLAGS = tf.flags.FLAGS
@@ -26,18 +28,22 @@ _LR_SCHEDULE = [  # (LR multiplier, epoch to start)
 ]
 
 
-def add_summaries(graph, predictions, labels):
+def add_summaries(graph, predictions, labels, loss):
 	# Add summaries for images, variables and losses.
 	global_summaries = set([])
 	# prediction summary
 	predictions = tf.expand_dims(predictions, 3)
 	predictions = tf.cast(predictions, tf.float32)
 	predictions = tf.multiply(predictions, 255)
-	image_summary = tf.summary.image('image_summary', predictions)
+	image_summary = tf.summary.image('prediction_summary', predictions)
 	global_summaries.add(image_summary)
+	# label summary
+	labels_summary = tf.summary.image('label_summary', labels)
+	global_summaries.add(labels_summary)
 	for model_var in tf.get_collection('trainable_variables'):
 		global_summaries.add(tf.summary.histogram(model_var.op.name, model_var))
 		# total loss
+	global_summaries.add(tf.summary.scalar('loss', loss))
 	summary_op = tf.summary.merge(list(global_summaries), name='summary_op')
 	return summary_op
 
@@ -85,10 +91,12 @@ def model_fn(features, labels, mode, params):
 
 	predictions = tf.argmax(logits, axis=-1)
 	if mode == tf.estimator.ModeKeys.PREDICT:
+		tf.logging.info("Starting to predict..")
 		predictions = {
 			'class_ids': predictions,
 			'probabilities': probs,
 			'logits': logits,
+			'image_ids': labels
 		}
 		return tf.estimator.EstimatorSpec(mode, predictions=predictions)
 
@@ -99,54 +107,73 @@ def model_fn(features, labels, mode, params):
 		logits=logits, onehot_labels=labels)
 	# include the regulization losses in the loss collection.
 	loss = tf.losses.get_total_loss()
-	# tf.logging.info("Starting to evaluate..")
-	# if mode == tf.estimator.ModeKeys.EVAL:
-	# 	tf.logging.info("Starting to evaluate..")
-	# 	return tf.estimator.EstimatorSpec(
-	# 		mode=mode,
-	# 		eval_metric_ops={"accuracy": tf.metrics.accuracy(labels, predictions)})
+	if mode == tf.estimator.ModeKeys.EVAL:
+		tf.logging.info("Starting to evaluate..")
+		with tf.variable_scope('mean_iou_calc'):
+			prec = []
+			up_opts = []
+			for t in np.arange(0.5, 1.0, 0.05):
+				predicted_mask = tf.to_int32(probs > t)
+				score, up_opt = tf.metrics.mean_iou(labels, predicted_mask, 2)
+				up_opts.append(up_opt)
+				prec.append(score)
+			mean_iou = tf.reduce_mean(tf.stack(prec), axis=0), tf.stack(up_opts)
+
+		eval_metrics = {'mean_iou': mean_iou}
+		return tf.estimator.EstimatorSpec(
+			mode=mode,
+			loss=loss,
+			eval_metric_ops=eval_metrics)
 
 	assert mode == tf.estimator.ModeKeys.TRAIN
 	tf.logging.info("Starting to train..")
 	global_step = tf.train.get_global_step()
 	update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-	optimizer = tf.train.AdagradOptimizer(learning_rate=0.001)
-	# https://www.tensorflow.org/api_docs/python/tf/layers/batch_normalization
+	optimizer = tf.train.AdagradOptimizer(learning_rate=1e-4)
 	with tf.control_dependencies(update_ops):
 		train_op = optimizer.minimize(loss, global_step=global_step)
-
-	add_summaries(densenet.graph, predictions, labels)
+	add_summaries(densenet.graph, predictions, labels, loss)
 	return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
 
 
 def main(argv):
 	args = parser.parse_args(argv[1:])
-
-	config = tf.estimator.RunConfig(save_checkpoints_steps=30,
-	                                save_summary_steps=30,
-	                                model_dir=args.model_dir)
+	config = tf.estimator.RunConfig(save_checkpoints_steps=30, save_summary_steps=30, model_dir=args.model_dir)
 	classifier = tf.estimator.Estimator(
 		model_fn=model_fn,
 		config=config,
 		params={
 			'number_classes': args.number_classes,
-			'growth_rate': 12,
+			'growth_rate': 6,
 			'dropout_keep_prob': 0.2,
 			'encoder_num_units': [4, 5, 7, 10],
 			'decoder_num_units': [10, 7, 5],
-			'bottleneck_number_feature_maps': 48
+			'bottleneck_number_feature_maps': 24
 		}
 	)
 
-	# Train the Model.
+	# # Train the Model.
 	classifier.train(
 		input_fn=lambda: generate_data(args.batch_size, args.number_classes),
 		steps=args.train_steps)
 
+	# Eval the Model.
+	classifier.evaluate(
+		input_fn=lambda: generate_data(args.batch_size, args.number_classes))
+
 	# Predict the model.
 	pred_result = classifier.predict(
 		input_fn=lambda: generate_data(args.batch_size, args.number_classes, inference=True))
-	print(pred_result)
+	new_test_ids = []
+	rles = []
+	for pred in pred_result:
+		# TODO: Make sure prediction is same size as test
+		rle = utils.prob_to_rles(pred, cutoff=0.5)
+		rles.extend(rle)
+		new_test_ids.extend()
+
+		preds_test.append(pred)
+	print(preds_test)
 
 
 if __name__ == '__main__':
