@@ -2,18 +2,20 @@ import tensorflow as tf
 import argparse
 import sys
 import numpy as np
+import pandas as pd
+import datetime
 
 sys.path.append('/Users/denizzorlu/seglib/')
 
-
 from models.densenet import DenseNet
-from data.data_generator import generate_data
+from data.data_generator import generate_train_data, generate_predict_data
 from utils.tf_utils import get_number_params
 from utils import utils
 
 
 FLAGS = tf.flags.FLAGS
 parser = argparse.ArgumentParser()
+parser.add_argument('--predict', default=True, type=bool, help='predict or train')
 parser.add_argument('--batch_size', default=4, type=int, help='batch size')
 parser.add_argument('--number_classes', default=2, type=int, help='number of classes')
 parser.add_argument('--model_dir', default='/tmp/tf/seg/', type=str, help='number of classes')
@@ -28,8 +30,10 @@ _LR_SCHEDULE = [  # (LR multiplier, epoch to start)
 ]
 
 
-def add_summaries(graph, predictions, labels, loss):
-	# Add summaries for images, variables and losses.
+def add_summaries(predictions, features, loss):
+	"""
+	Add summaries for images, variables and losses.
+	"""
 	global_summaries = set([])
 	# prediction summary
 	predictions = tf.expand_dims(predictions, 3)
@@ -37,8 +41,8 @@ def add_summaries(graph, predictions, labels, loss):
 	predictions = tf.multiply(predictions, 255)
 	image_summary = tf.summary.image('prediction_summary', predictions)
 	global_summaries.add(image_summary)
-	# label summary
-	labels_summary = tf.summary.image('label_summary', labels)
+	# image summary
+	labels_summary = tf.summary.image('image_summary', features)
 	global_summaries.add(labels_summary)
 	for model_var in tf.get_collection('trainable_variables'):
 		global_summaries.add(tf.summary.histogram(model_var.op.name, model_var))
@@ -79,25 +83,33 @@ def model_fn(features, labels, mode, params):
 	decoder_num_units = params.get('decoder_num_units')
 	bottleneck_number_feature_maps = params.get('bottleneck_number_feature_maps')
 
+	tf.logging.info("features tensor {}".format(features))
+	features, image_ids, image_shapes = features['image'], features['image_id'], features['image_shape']
+
 	densenet = DenseNet(growth_rate=growth_rate,
 											dropout_keep_prob=dropout_keep_prob,
 											number_classes=number_classes,
 											is_training=(mode == tf.estimator.ModeKeys.TRAIN))
+
 	densenet.encode(features=features,
-									num_units=encoder_num_units,
-									bottleneck_number_feature_maps=bottleneck_number_feature_maps)
+		num_units=encoder_num_units,
+		bottleneck_number_feature_maps=bottleneck_number_feature_maps)
 	logits = densenet.decode(decoder_num_units).output
 	probs = tf.nn.softmax(logits)
-
-	predictions = tf.argmax(logits, axis=-1)
+	predictions = tf.argmax(probs, axis=-1)
 	if mode == tf.estimator.ModeKeys.PREDICT:
+		# resize the predictions back to original size.
+		# label_shape = tf.shape(features)[:2]
+		probs = tf.image.resize_bilinear(probs, image_shapes, name='resize_predictions')
+		predictions = tf.argmax(probs, axis=-1)
 		tf.logging.info("Starting to predict..")
 		predictions = {
 			'class_ids': predictions,
 			'probabilities': probs,
 			'logits': logits,
-			'image_ids': labels
+			'image_ids': image_ids
 		}
+		tf.logging.info("prediction tensor {}".format(predictions))
 		return tf.estimator.EstimatorSpec(mode, predictions=predictions)
 
 	# Add the loss.
@@ -132,13 +144,17 @@ def model_fn(features, labels, mode, params):
 	optimizer = tf.train.AdagradOptimizer(learning_rate=1e-4)
 	with tf.control_dependencies(update_ops):
 		train_op = optimizer.minimize(loss, global_step=global_step)
-	add_summaries(densenet.graph, predictions, labels, loss)
+	add_summaries(predictions, features, loss)
 	return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
 
 
 def main(argv):
 	args = parser.parse_args(argv[1:])
-	config = tf.estimator.RunConfig(save_checkpoints_steps=30, save_summary_steps=30, model_dir=args.model_dir)
+	print(args)
+	predict = args.predict
+	config = tf.estimator.RunConfig(save_checkpoints_steps=30,
+		save_summary_steps=30,
+		model_dir=args.model_dir)
 	classifier = tf.estimator.Estimator(
 		model_fn=model_fn,
 		config=config,
@@ -152,28 +168,38 @@ def main(argv):
 		}
 	)
 
-	# # Train the Model.
-	classifier.train(
-		input_fn=lambda: generate_data(args.batch_size, args.number_classes),
-		steps=args.train_steps)
-
-	# Eval the Model.
-	classifier.evaluate(
-		input_fn=lambda: generate_data(args.batch_size, args.number_classes))
-
-	# Predict the model.
-	pred_result = classifier.predict(
-		input_fn=lambda: generate_data(args.batch_size, args.number_classes, inference=True))
-	new_test_ids = []
-	rles = []
-	for pred in pred_result:
-		# TODO: Make sure prediction is same size as test
-		rle = utils.prob_to_rles(pred, cutoff=0.5)
-		rles.extend(rle)
-		new_test_ids.extend()
-
-		preds_test.append(pred)
-	print(preds_test)
+	# # # Train the Model.
+	if not predict:
+		classifier.train(
+			input_fn=lambda: generate_train_data(args.batch_size, args.number_classes),
+			steps=args.train_steps)
+		# # Eval the Model.
+		# classifier.evaluate(
+		# 	input_fn=lambda: generate_data(args.batch_size, args.number_classes))
+	else:
+		# Predict the model.
+		pred_result = classifier.predict(
+			input_fn=lambda: generate_predict_data())
+		new_test_ids = []
+		rles = []
+		for i, pred in enumerate(pred_result):
+			for key, value in pred.items():
+				if key not in 'image_ids':
+					print(key, " has shape ", value.shape)
+			print("process {} result".format(i))
+			class_predictions = pred['class_ids']
+			image_id = pred['image_ids'].decode()
+			print(image_id)
+			rle = list(utils.prob_to_rles(class_predictions))
+			rles.extend(rle)
+			new_test_ids.extend([image_id] * len(rle))
+		sub = pd.DataFrame()
+		sub['ImageId'] = new_test_ids
+		sub['EncodedPixels'] = pd.Series(rles).apply(lambda x: ' '.join(str(y) for y in x))
+		print("submission has shape {}".format(sub.shape))
+		timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+		print('Submission output to: sub-{}.csv'.format(timestamp))
+		sub.to_csv("~/Documents/submission_{}.csv".format(timestamp), index=False)
 
 
 if __name__ == '__main__':
